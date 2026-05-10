@@ -61,22 +61,47 @@ chunk-oids sha256:cef489e85c00... sha256:0b3e8860e838... sha256:80be0fd9404f... 
 
 ## 快速开始
 
+### 1. 安装（只需一次）
+
+将项目克隆到任意位置并编译，二进制文件可以放在任何地方，不需要放入你的项目仓库：
+
 ```bash
-# 编译
+# 克隆并编译
+git clone https://github.com/your-org/git-chunked-store.git
+cd git-chunked-store
 go build -o git-chunked-store .
 
-# 在仓库中配置 git filter
-./git-chunked-store setup
+# 可以移到 PATH 中的任意位置，例如：
+sudo mv git-chunked-store /usr/local/bin/
+```
 
-# 正常使用 git，过滤器自动生效
-cp large-video.mp4 ./my-repo/
-cd my-repo
+### 2. 在你的仓库中配置
+
+进入你自己的项目仓库，运行 `setup`。它会配置 git filter、创建 `.gitattributes`、安装 gc 钩子：
+
+```bash
+cd /path/to/your/project
+git-chunked-store setup
+```
+
+如果二进制不在 PATH 中，也可以直接用绝对路径：
+
+```bash
+/path/to/git-chunked-store setup
+```
+
+### 3. 正常使用 git
+
+之后所有操作都是标准的 git 命令，无需额外操作：
+
+```bash
+cp large-video.mp4 .
 git add .
 git commit -m "add large binary"    # 自动触发 clean 过滤器
 git checkout other-branch           # 自动触发 smudge 过滤器
 ```
 
-`setup` 命令会配置三项 git 设置，并创建包含常见二进制文件类型的 `.gitattributes` 文件。用户可按需增减文件类型映射，例如只对 `.pdf` 和 `.zip` 启用分片存储，或添加项目特有的二进制类型。
+`setup` 会将 git-chunked-store 的绝对路径写入 git config，所以 git 会自动找到它。用户可按需增减 `.gitattributes` 中的文件类型映射，例如只对 `.pdf` 和 `.zip` 启用分片存储，或添加项目特有的二进制类型。`git gc --auto` 会自动清理不再被引用的孤立分片，无需手动操作。
 
 ## 子命令
 

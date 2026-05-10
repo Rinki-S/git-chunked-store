@@ -61,22 +61,47 @@ Content is zlib-compressed, so identical chunks across different files or versio
 
 ## Quick Start
 
+### 1. Install (do once)
+
+Clone and build the project from any location — the binary can be placed anywhere and does not need to be inside your project repository:
+
 ```bash
-# Build
+# Clone and build
+git clone https://github.com/your-org/git-chunked-store.git
+cd git-chunked-store
 go build -o git-chunked-store .
 
-# Configure git filter in your repository
-./git-chunked-store setup
+# Move to a location in your PATH, for example:
+sudo mv git-chunked-store /usr/local/bin/
+```
 
-# Normal git workflow — filters are automatic
-cp large-video.mp4 ./my-repo/
-cd my-repo
+### 2. Configure in your repository
+
+Navigate to your own project repository and run `setup`. It configures the git filter, creates `.gitattributes`, and installs the gc hook:
+
+```bash
+cd /path/to/your/project
+git-chunked-store setup
+```
+
+If the binary is not in your PATH, you can also use the absolute path directly:
+
+```bash
+/path/to/git-chunked-store setup
+```
+
+### 3. Use git normally
+
+After that, all operations are standard git commands — no additional steps required:
+
+```bash
+cp large-video.mp4 .
 git add .
 git commit -m "add large binary"    # clean filter triggers automatically
 git checkout other-branch           # smudge filter triggers automatically
 ```
 
-`setup` configures three git settings, creates a `.gitattributes` file with common binary types, and installs a `pre-auto-gc` hook so that `git gc --auto` runs chunk garbage collection automatically. Users can add or remove file type patterns in `.gitattributes` to match their project's needs — for example, only enabling chunked storage for `.pdf` and `.zip`, or adding project-specific binary types.
+`setup` writes the absolute path of git-chunked-store into git config, so git can find it automatically. Users can add or remove file type patterns in `.gitattributes` as needed — for example, only enabling chunked storage for `.pdf` and `.zip`, or adding project-specific binary types. `git gc --auto` automatically cleans up orphaned chunks that are no longer referenced — no manual operation needed.
 
 ## Subcommands
 
