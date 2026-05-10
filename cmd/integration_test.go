@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"git-chunked-store/internal/pointer"
@@ -372,5 +373,191 @@ func TestProcessSmudge_MalformedPointer(t *testing.T) {
 	_, err := ProcessSmudge(malformed, s)
 	if err == nil {
 		t.Error("expected error for malformed pointer, got nil")
+	}
+}
+
+// TestProcessCleanStreaming_SmallFile tests streaming clean with a small file
+// that fits within a single chunk.
+func TestProcessCleanStreaming_SmallFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := store.New(tmpDir)
+
+	original := []byte("hello world, streaming test")
+
+	pointerStr, err := ProcessCleanStreaming(strings.NewReader(string(original)), s)
+	if err != nil {
+		t.Fatalf("ProcessCleanStreaming failed: %v", err)
+	}
+
+	reconstructed, err := ProcessSmudge([]byte(pointerStr), s)
+	if err != nil {
+		t.Fatalf("ProcessSmudge failed: %v", err)
+	}
+
+	if !bytes.Equal(reconstructed, original) {
+		t.Errorf("round-trip mismatch: got %q, want %q", reconstructed, original)
+	}
+}
+
+// TestProcessCleanStreaming_EmptyFile tests streaming clean with an empty file
+// (0 chunks).
+func TestProcessCleanStreaming_EmptyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := store.New(tmpDir)
+
+	pointerStr, err := ProcessCleanStreaming(strings.NewReader(""), s)
+	if err != nil {
+		t.Fatalf("ProcessCleanStreaming failed: %v", err)
+	}
+
+	p, err := pointer.ParseBytes([]byte(pointerStr))
+	if err != nil {
+		t.Fatalf("parsing pointer: %v", err)
+	}
+	if p.Chunks != 0 {
+		t.Errorf("expected 0 chunks for empty file, got %d", p.Chunks)
+	}
+	if p.Size != 0 {
+		t.Errorf("expected size 0, got %d", p.Size)
+	}
+
+	reconstructed, err := ProcessSmudge([]byte(pointerStr), s)
+	if err != nil {
+		t.Fatalf("ProcessSmudge failed: %v", err)
+	}
+	if len(reconstructed) != 0 {
+		t.Errorf("expected empty result, got %d bytes", len(reconstructed))
+	}
+}
+
+// TestProcessCleanStreaming_MultipleChunks tests streaming clean with data
+// larger than 64KB, producing multiple chunks.
+func TestProcessCleanStreaming_MultipleChunks(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := store.New(tmpDir)
+
+	// 200KB of data: 3 full chunks + 1 partial chunk
+	size := 200 * 1024
+	original := make([]byte, size)
+	for i := range original {
+		original[i] = byte(i % 256)
+	}
+
+	pointerStr, err := ProcessCleanStreaming(bytes.NewReader(original), s)
+	if err != nil {
+		t.Fatalf("ProcessCleanStreaming failed: %v", err)
+	}
+
+	p, err := pointer.ParseBytes([]byte(pointerStr))
+	if err != nil {
+		t.Fatalf("parsing pointer: %v", err)
+	}
+	if p.Chunks != 4 {
+		t.Errorf("expected 4 chunks, got %d", p.Chunks)
+	}
+	if p.Size != int64(size) {
+		t.Errorf("expected size %d, got %d", size, p.Size)
+	}
+
+	reconstructed, err := ProcessSmudge([]byte(pointerStr), s)
+	if err != nil {
+		t.Fatalf("ProcessSmudge failed: %v", err)
+	}
+
+	if !bytes.Equal(reconstructed, original) {
+		t.Errorf("round-trip mismatch: got %d bytes, want %d bytes", len(reconstructed), len(original))
+	}
+}
+
+// TestProcessCleanStreaming_ExactChunkBoundary tests streaming clean with data
+// that is exactly a multiple of the chunk size.
+func TestProcessCleanStreaming_ExactChunkBoundary(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := store.New(tmpDir)
+
+	// Exactly 128KB = 2 full chunks, no partial chunk
+	size := 2 * DefaultChunkSize
+	original := make([]byte, size)
+	for i := range original {
+		original[i] = byte((i * 7) % 256)
+	}
+
+	pointerStr, err := ProcessCleanStreaming(bytes.NewReader(original), s)
+	if err != nil {
+		t.Fatalf("ProcessCleanStreaming failed: %v", err)
+	}
+
+	p, err := pointer.ParseBytes([]byte(pointerStr))
+	if err != nil {
+		t.Fatalf("parsing pointer: %v", err)
+	}
+	if p.Chunks != 2 {
+		t.Errorf("expected 2 chunks, got %d", p.Chunks)
+	}
+
+	reconstructed, err := ProcessSmudge([]byte(pointerStr), s)
+	if err != nil {
+		t.Fatalf("ProcessSmudge failed: %v", err)
+	}
+
+	if !bytes.Equal(reconstructed, original) {
+		t.Errorf("round-trip mismatch for exact boundary file")
+	}
+}
+
+// TestProcessCleanStreaming_CommonWithProcessClean verifies that streaming and
+// in-memory processing produce identical pointer files for the same input data.
+func TestProcessCleanStreaming_CommonWithProcessClean(t *testing.T) {
+	// Use two separate stores so chunk deduplication doesn't mask differences
+	s1 := store.New(t.TempDir())
+	s2 := store.New(t.TempDir())
+
+	original := make([]byte, 3*DefaultChunkSize+500)
+	for i := range original {
+		original[i] = byte(i % 251)
+	}
+
+	pointerInMem, err := ProcessClean(original, s1)
+	if err != nil {
+		t.Fatalf("ProcessClean failed: %v", err)
+	}
+
+	pointerStreaming, err := ProcessCleanStreaming(bytes.NewReader(original), s2)
+	if err != nil {
+		t.Fatalf("ProcessCleanStreaming failed: %v", err)
+	}
+
+	if pointerInMem != pointerStreaming {
+		t.Errorf("in-memory and streaming produce different pointer files:\n  in-mem:    %s\n  streaming: %s", pointerInMem, pointerStreaming)
+	}
+}
+
+// TestProcessCleanStreaming_Sha256Correctness verifies that the streaming
+// SHA-256 computation produces the same hash as a single-pass computation.
+func TestProcessCleanStreaming_Sha256Correctness(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := store.New(tmpDir)
+
+	data := make([]byte, DefaultChunkSize+500)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+
+	// Expected hash computed in one pass
+	expectedHash := sha256.Sum256(data)
+	expectedOid := hex.EncodeToString(expectedHash[:])
+
+	pointerStr, err := ProcessCleanStreaming(bytes.NewReader(data), s)
+	if err != nil {
+		t.Fatalf("ProcessCleanStreaming failed: %v", err)
+	}
+
+	p, err := pointer.ParseBytes([]byte(pointerStr))
+	if err != nil {
+		t.Fatalf("parsing pointer: %v", err)
+	}
+
+	if p.Oid != expectedOid {
+		t.Errorf("streaming hash mismatch:\n  got  %s\n  want %s", p.Oid, expectedOid)
 	}
 }
