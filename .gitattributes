@@ -1,0 +1,17 @@
+# Managed by git-chunked-store — filter=chunked applies chunked storage
+*.bin filter=chunked
+*.zip filter=chunked
+*.tar filter=chunked
+*.gz filter=chunked
+*.mp4 filter=chunked
+*.avi filter=chunked
+*.pdf filter=chunked
+*.docx filter=chunked
+*.xlsx filter=chunked
+*.pptx filter=chunked
+*.exe filter=chunked
+*.dll filter=chunked
+*.so filter=chunked
+*.dylib filter=chunked
+*.iso filter=chunked
+*.dmg filter=chunked
