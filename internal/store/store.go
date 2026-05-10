@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync/atomic"
 )
 
 // DefaultBasePath is the default storage directory relative to the git repo root.
@@ -18,6 +20,10 @@ const DefaultBasePath = ".git/chunked-objects"
 
 // ValidOIDLength is the expected length of a hex-encoded SHA-256 hash.
 const ValidOIDLength = 64
+
+// tmpFileCounter is used to generate unique temporary file names when
+// multiple processes write the same chunk concurrently.
+var tmpFileCounter atomic.Int64
 
 // Store manages chunked object storage on disk.
 // Each chunk is stored at: <basePath>/<sha256_prefix_2>/<sha256_remaining_62>
@@ -106,16 +112,25 @@ func (s *Store) Save(oid string, data []byte) error {
 		return fmt.Errorf("compressing chunk %s: %w", oid, err)
 	}
 
-	// Write to a temp file first, then rename atomically to avoid partial writes
-	tmpPath := path + ".tmp"
+	// Write to a temp file first, then rename atomically to avoid partial writes.
+	// Use a unique suffix (process ID + monotonic counter) to avoid conflicts
+	// when multiple processes write the same chunk concurrently.
+	tmpPath := path + ".tmp." + strconv.Itoa(os.Getpid()) + "." + strconv.FormatInt(tmpFileCounter.Add(1), 10)
 	if err := os.WriteFile(tmpPath, compressed, 0644); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("writing chunk %s: %w", oid, err)
 	}
 
-	// Atomic rename
+	// Atomic rename. If another process already wrote the same chunk, the target
+	// file exists and Rename will fail on POSIX systems. Since content-addressed
+	// storage guarantees identical content, this is a success case, not an error.
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
+		// Check if the target file now exists — if so, another process won the race
+		// and we can safely treat this as success (the content is identical).
+		if _, statErr := os.Stat(path); statErr == nil {
+			return nil
+		}
 		return fmt.Errorf("renaming chunk %s: %w", oid, err)
 	}
 
