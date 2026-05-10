@@ -6,6 +6,7 @@ package store
 import (
 	"bytes"
 	"compress/zlib"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,9 @@ import (
 
 // DefaultBasePath is the default storage directory relative to the git repo root.
 const DefaultBasePath = ".git/chunked-objects"
+
+// ValidOIDLength is the expected length of a hex-encoded SHA-256 hash.
+const ValidOIDLength = 64
 
 // Store manages chunked object storage on disk.
 // Each chunk is stored at: <basePath>/<sha256_prefix_2>/<sha256_remaining_62>
@@ -32,30 +36,62 @@ func New(basePath string) *Store {
 	return &Store{basePath: basePath}
 }
 
+// validateOid checks that an oid is a valid hex-encoded SHA-256 hash.
+// This prevents path traversal attacks (e.g., "../../etc/passwd") and
+// ensures the oid is safe to use in filesystem paths.
+func validateOid(oid string) error {
+	if len(oid) != ValidOIDLength {
+		return fmt.Errorf("invalid oid length: expected %d chars, got %d", ValidOIDLength, len(oid))
+	}
+	// Verify all characters are valid lowercase hex digits.
+	// This rejects any path traversal attempts containing /, ., etc.
+	for i, c := range oid {
+		if !isHexDigit(c) {
+			return fmt.Errorf("invalid oid character at position %d: %q (oid must be lowercase hex)", i, c)
+		}
+	}
+	return nil
+}
+
+// isHexDigit returns true if c is a valid lowercase hex digit (0-9, a-f).
+func isHexDigit(c rune) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+}
+
 // oidToPath converts a hex-encoded SHA-256 oid to a filesystem path.
 // The path format is: <basePath>/<first 2 hex chars>/<remaining 62 hex chars>
 // This mirrors git's loose object layout to avoid single-directory file count issues.
+// The oid must be validated before calling this method.
 func (s *Store) oidToPath(oid string) string {
-	if len(oid) < 3 {
-		// Shouldn't happen with valid SHA-256 hashes, but handle gracefully
-		return filepath.Join(s.basePath, oid)
-	}
 	return filepath.Join(s.basePath, oid[:2], oid[2:])
 }
 
 // Exists checks whether a chunk with the given oid is already stored.
-func (s *Store) Exists(oid string) bool {
+func (s *Store) Exists(oid string) (bool, error) {
+	if err := validateOid(oid); err != nil {
+		return false, fmt.Errorf("validating oid: %w", err)
+	}
 	_, err := os.Stat(s.oidToPath(oid))
-	return err == nil
+	return err == nil, nil
 }
 
 // Save writes a chunk to storage. The data is zlib-compressed before writing.
 // If a chunk with the same oid already exists, it returns nil immediately (deduplication).
+// The oid must be a valid hex-encoded SHA-256 hash of the data for content-addressed
+// storage to work correctly.
 func (s *Store) Save(oid string, data []byte) error {
+	if err := validateOid(oid); err != nil {
+		return fmt.Errorf("validating oid: %w", err)
+	}
+
 	path := s.oidToPath(oid)
 
 	// Deduplication: skip if already stored
-	if s.Exists(oid) {
+	exists, err := s.Exists(oid)
+	if err != nil {
+		return fmt.Errorf("checking existence for chunk %s: %w", oid, err)
+	}
+	if exists {
 		return nil
 	}
 
@@ -88,6 +124,10 @@ func (s *Store) Save(oid string, data []byte) error {
 
 // Load reads and decompresses a chunk from storage by its oid.
 func (s *Store) Load(oid string) ([]byte, error) {
+	if err := validateOid(oid); err != nil {
+		return nil, fmt.Errorf("validating oid: %w", err)
+	}
+
 	path := s.oidToPath(oid)
 
 	compressed, err := os.ReadFile(path)
@@ -105,6 +145,10 @@ func (s *Store) Load(oid string) ([]byte, error) {
 
 // Remove deletes a chunk from storage. This is useful for cleanup operations.
 func (s *Store) Remove(oid string) error {
+	if err := validateOid(oid); err != nil {
+		return fmt.Errorf("validating oid: %w", err)
+	}
+
 	path := s.oidToPath(oid)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing chunk %s: %w", oid, err)
@@ -115,6 +159,16 @@ func (s *Store) Remove(oid string) error {
 // BasePath returns the base storage directory path.
 func (s *Store) BasePath() string {
 	return s.basePath
+}
+
+// ValidateAndDecodeOid validates that an oid string is a proper hex-encoded
+// SHA-256 hash and returns the raw bytes. This is useful for callers that
+// need to convert oid strings back to byte form.
+func ValidateAndDecodeOid(oid string) ([]byte, error) {
+	if err := validateOid(oid); err != nil {
+		return nil, err
+	}
+	return hex.DecodeString(oid)
 }
 
 // zlibCompress compresses data using zlib at the default compression level.

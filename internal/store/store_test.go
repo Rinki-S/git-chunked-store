@@ -35,7 +35,6 @@ func TestOidToPath(t *testing.T) {
 	s := New("/repo/.git/chunked-objects")
 
 	oid := "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
-	// SHA-256 hex is 64 chars; first 2 = "a1", remaining = "b2c3..."
 	expected := filepath.Join("/repo/.git/chunked-objects", "a1", "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")
 
 	got := s.oidToPath(oid)
@@ -44,15 +43,98 @@ func TestOidToPath(t *testing.T) {
 	}
 }
 
-func TestOidToPath_ShortOid(t *testing.T) {
-	s := New("/repo/.git/chunked-objects")
+func TestValidateOid_Valid(t *testing.T) {
+	// Standard 64-char lowercase hex string
+	oid := "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	if err := validateOid(oid); err != nil {
+		t.Errorf("valid oid should pass, got error: %v", err)
+	}
 
-	// Oid shorter than 3 chars — should fall back to flat path
-	shortOid := "ab"
-	got := s.oidToPath(shortOid)
-	expected := filepath.Join("/repo/.git/chunked-objects", shortOid)
-	if got != expected {
-		t.Errorf("oidToPath(%q) = %q, want %q", shortOid, got, expected)
+	// All-zeros is valid
+	oid = "0000000000000000000000000000000000000000000000000000000000000000"
+	if err := validateOid(oid); err != nil {
+		t.Errorf("all-zeros oid should pass, got error: %v", err)
+	}
+
+	// All-f is valid
+	oid = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	if err := validateOid(oid); err != nil {
+		t.Errorf("all-f oid should pass, got error: %v", err)
+	}
+}
+
+func TestValidateOid_InvalidLength(t *testing.T) {
+	// Too short
+	if err := validateOid("abc"); err == nil {
+		t.Error("expected error for short oid, got nil")
+	}
+
+	// Too long
+	longOid := "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2extra"
+	if err := validateOid(longOid); err == nil {
+		t.Error("expected error for long oid, got nil")
+	}
+
+	// Empty
+	if err := validateOid(""); err == nil {
+		t.Error("expected error for empty oid, got nil")
+	}
+}
+
+func TestValidateOid_InvalidCharacters(t *testing.T) {
+	// Uppercase hex (not allowed)
+	if err := validateOid("A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2"); err == nil {
+		t.Error("expected error for uppercase hex oid, got nil")
+	}
+
+	// Non-hex characters
+	if err := validateOid("g1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"); err == nil {
+		t.Error("expected error for non-hex oid, got nil")
+	}
+}
+
+func TestValidateOid_PathTraversal(t *testing.T) {
+	// Classic path traversal attempts
+	tests := []struct {
+		name string
+		oid  string
+	}{
+		{"dot-dot", "../../../../etc/passwd"},
+		{"dot-slash", "./../../etc/passwd"},
+		{"absolute-path", "/etc/passwd"},
+		{"mixed", "..%2f..%2fetc%2fpasswd"},
+		{"null-byte", "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1\000"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateOid(tt.oid); err == nil {
+				t.Errorf("expected error for path traversal oid %q, got nil", tt.oid)
+			}
+		})
+	}
+}
+
+func TestValidateAndDecodeOid(t *testing.T) {
+	oid := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	decoded, err := ValidateAndDecodeOid(oid)
+	if err != nil {
+		t.Fatalf("valid oid should decode, got error: %v", err)
+	}
+	if len(decoded) != 32 {
+		t.Errorf("decoded oid should be 32 bytes, got %d", len(decoded))
+	}
+
+	// Verify round-trip
+	reencoded := hex.EncodeToString(decoded)
+	if reencoded != oid {
+		t.Errorf("round-trip mismatch: got %q, want %q", reencoded, oid)
+	}
+
+	// Invalid oid should fail
+	_, err = ValidateAndDecodeOid("invalid")
+	if err == nil {
+		t.Error("expected error for invalid oid, got nil")
 	}
 }
 
@@ -69,7 +151,11 @@ func TestSaveAndLoad_RoundTrip(t *testing.T) {
 	}
 
 	// Verify file exists on disk
-	if !s.Exists(oid) {
+	exists, err := s.Exists(oid)
+	if err != nil {
+		t.Fatalf("Exists error: %v", err)
+	}
+	if !exists {
 		t.Fatal("Exists returned false after Save")
 	}
 
@@ -151,11 +237,42 @@ func TestSave_EmptyData(t *testing.T) {
 	}
 }
 
+func TestSave_InvalidOid(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := New(tmpDir)
+
+	// Path traversal attempt
+	if err := s.Save("../../etc/passwd", []byte("malicious")); err == nil {
+		t.Error("expected error for path traversal oid, got nil")
+	}
+
+	// Too short
+	if err := s.Save("abc", []byte("data")); err == nil {
+		t.Error("expected error for short oid, got nil")
+	}
+
+	// Uppercase hex
+	if err := s.Save("A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2", []byte("data")); err == nil {
+		t.Error("expected error for uppercase hex oid, got nil")
+	}
+}
+
+func TestLoad_InvalidOid(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := New(tmpDir)
+
+	// Path traversal attempt
+	if _, err := s.Load("../../etc/passwd"); err == nil {
+		t.Error("expected error for path traversal oid, got nil")
+	}
+}
+
 func TestLoad_NotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 	s := New(tmpDir)
 
-	_, err := s.Load("nonexistent0000000000000000000000000000000000000000000000000000")
+	// Use a valid-looking 64-char hex oid that doesn't exist
+	_, err := s.Load("0000000000000000000000000000000000000000000000000000000000000099")
 	if err == nil {
 		t.Fatal("expected error for non-existent oid, got nil")
 	}
@@ -165,8 +282,23 @@ func TestExists_NotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 	s := New(tmpDir)
 
-	if s.Exists("doesnotexist000000000000000000000000000000000000000000000000000") {
+	// Use a valid-looking 64-char hex oid that doesn't exist
+	exists, err := s.Exists("0000000000000000000000000000000000000000000000000000000000000099")
+	if err != nil {
+		t.Fatalf("Exists returned unexpected error: %v", err)
+	}
+	if exists {
 		t.Error("Exists returned true for non-existent oid")
+	}
+}
+
+func TestExists_InvalidOid(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := New(tmpDir)
+
+	_, err := s.Exists("../../etc/passwd")
+	if err == nil {
+		t.Error("expected error for path traversal oid, got nil")
 	}
 }
 
@@ -180,14 +312,22 @@ func TestRemove(t *testing.T) {
 	if err := s.Save(oid, data); err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
-	if !s.Exists(oid) {
+	exists, err := s.Exists(oid)
+	if err != nil {
+		t.Fatalf("Exists error: %v", err)
+	}
+	if !exists {
 		t.Fatal("chunk should exist after Save")
 	}
 
 	if err := s.Remove(oid); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
-	if s.Exists(oid) {
+	exists, err = s.Exists(oid)
+	if err != nil {
+		t.Fatalf("Exists error after remove: %v", err)
+	}
+	if exists {
 		t.Error("chunk should not exist after Remove")
 	}
 }
@@ -196,10 +336,19 @@ func TestRemove_NonExistent(t *testing.T) {
 	tmpDir := t.TempDir()
 	s := New(tmpDir)
 
-	// Removing a non-existent oid should not error
-	err := s.Remove("nonexistent000000000000000000000000000000000000000000000000")
+	// Use a valid-looking 64-char hex oid that doesn't exist
+	err := s.Remove("0000000000000000000000000000000000000000000000000000000000000099")
 	if err != nil {
 		t.Errorf("Remove of non-existent oid returned error: %v", err)
+	}
+}
+
+func TestRemove_InvalidOid(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := New(tmpDir)
+
+	if err := s.Remove("not-valid"); err == nil {
+		t.Error("expected error for invalid oid, got nil")
 	}
 }
 
@@ -263,7 +412,11 @@ func TestMultipleChunks(t *testing.T) {
 
 	// Verify each chunk individually
 	for i, data := range chunks {
-		if !s.Exists(oids[i]) {
+		exists, err := s.Exists(oids[i])
+		if err != nil {
+			t.Errorf("Exists chunk %d error: %v", i, err)
+		}
+		if !exists {
 			t.Errorf("chunk %d should exist", i)
 		}
 		loaded, err := s.Load(oids[i])
