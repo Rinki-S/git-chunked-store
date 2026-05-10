@@ -304,14 +304,73 @@ func TestProcessSmudge_ChunkNotFoundError(t *testing.T) {
 	}
 }
 
-// TestProcessSmudge_InvalidPointer tests that smudge returns an error
-// when given an invalid pointer file.
-func TestProcessSmudge_InvalidPointer(t *testing.T) {
+// TestIsPointer tests the pointer file magic header detection.
+func TestIsPointer(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want bool
+	}{
+		{"valid pointer header", "version https://git-lfs-chunked/1\noid sha256:abc", true},
+		{"empty string", "", false},
+		{"random binary", "\x89PNG\r\n\x1a\n", false},
+		{"plain text", "not a valid pointer file", false},
+		{"similar but different URL", "version https://git-lfs/1\n", false},
+		{"partial match", "version https://git-lfs-chunke", false},
+		{"just the header", "version https://git-lfs-chunked/1\n", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsPointer([]byte(tt.data))
+			if got != tt.want {
+				t.Errorf("IsPointer(%q) = %v, want %v", tt.data, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProcessSmudge_Passthrough tests that non-pointer content is returned
+// unchanged. This is critical for repositories where .gitattributes has been
+// configured but some files haven't been through the clean filter yet.
+func TestProcessSmudge_Passthrough(t *testing.T) {
 	tmpDir := t.TempDir()
 	s := store.New(tmpDir)
 
-	_, err := ProcessSmudge([]byte("not a valid pointer file"), s)
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{"plain text", []byte("hello world")},
+		{"binary-like data", []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A}},
+		{"empty data", []byte{}},
+		{"random binary", append([]byte{0xFF, 0xFE}, []byte("some content")...)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ProcessSmudge(tt.data, s)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !bytes.Equal(result, tt.data) {
+				t.Errorf("passthrough mismatch: got %v, want %v", result, tt.data)
+			}
+		})
+	}
+}
+
+// TestProcessSmudge_MalformedPointer tests that smudge returns an error
+// when given data that starts with the pointer magic header but fails to parse.
+func TestProcessSmudge_MalformedPointer(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := store.New(tmpDir)
+
+	// Starts with the magic header but is not a valid pointer file
+	malformed := []byte("version https://git-lfs-chunked/1\nbroken content here\n")
+
+	_, err := ProcessSmudge(malformed, s)
 	if err == nil {
-		t.Error("expected error for invalid pointer, got nil")
+		t.Error("expected error for malformed pointer, got nil")
 	}
 }
