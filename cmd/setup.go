@@ -9,8 +9,9 @@ import (
 
 // gitattributesContent is the default .gitattributes content that maps
 // common binary file types to the chunked filter.
-const gitattributesContent = `# Managed by git-chunked-store — do not edit manually
-# Use 'git-chunked-store setup' to regenerate
+// Users should add or remove patterns to match their project's needs.
+const gitattributesContent = `# Binary file types processed by git-chunked-store.
+# Add or remove patterns to match your project's needs.
 *.bin filter=chunked
 *.zip filter=chunked
 *.tar filter=chunked
@@ -33,9 +34,9 @@ const gitattributesContent = `# Managed by git-chunked-store — do not edit man
 // %s will be replaced with the absolute path to the git-chunked-store binary.
 // This hook runs automatically before 'git gc --auto' executes.
 const gcHookContent = `#!/bin/sh
-# Managed by git-chunked-store — do not edit manually
-# This hook runs chunk garbage collection before git gc --auto.
+# Runs chunk garbage collection before git gc --auto.
 # For manual gc, run: git-chunked-store gc
+# To disable, remove or comment out this hook.
 
 %s gc
 `
@@ -91,7 +92,7 @@ func RunSetup() error {
 		}
 	} else {
 		fmt.Fprintf(os.Stderr, "warning: .gitattributes already exists, skipping creation\n")
-		fmt.Fprintf(os.Stderr, "hint: you may need to manually add 'filter=chunked' rules to .gitattributes\n")
+		fmt.Fprintf(os.Stderr, "hint: add 'filter=chunked' rules to .gitattributes for any binary file types you need\n")
 	}
 
 	return nil
