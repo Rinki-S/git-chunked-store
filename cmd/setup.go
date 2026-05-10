@@ -29,9 +29,20 @@ const gitattributesContent = `# Managed by git-chunked-store — do not edit man
 *.dmg filter=chunked
 `
 
-// RunSetup configures git filter settings and creates .gitattributes.
-// It sets up the clean and smudge filters so that git automatically
-// applies chunked storage to files matching the .gitattributes patterns.
+// gcHookContent is the template for the pre-auto-gc hook.
+// %s will be replaced with the absolute path to the git-chunked-store binary.
+// This hook runs automatically before 'git gc --auto' executes.
+const gcHookContent = `#!/bin/sh
+# Managed by git-chunked-store — do not edit manually
+# This hook runs chunk garbage collection before git gc --auto.
+# For manual gc, run: git-chunked-store gc
+
+%s gc
+`
+
+// RunSetup configures git filter settings, creates .gitattributes,
+// and installs the pre-auto-gc hook so that chunk garbage collection
+// runs automatically as part of git gc.
 func RunSetup() error {
 	// Determine the binary path from the current executable
 	binPath, err := os.Executable()
@@ -64,6 +75,13 @@ func RunSetup() error {
 		}
 	}
 
+	// Install pre-auto-gc hook
+	if err := installGcHook(binPath); err != nil {
+		// Not fatal — the hook is a convenience, not a requirement
+		fmt.Fprintf(os.Stderr, "warning: could not install gc hook: %v\n", err)
+		fmt.Fprintf(os.Stderr, "hint: you can manually run 'git-chunked-store gc' to clean up unreferenced chunks\n")
+	}
+
 	// Create .gitattributes if it doesn't exist
 	gitattributesPath := ".gitattributes"
 
@@ -76,5 +94,40 @@ func RunSetup() error {
 		fmt.Fprintf(os.Stderr, "hint: you may need to manually add 'filter=chunked' rules to .gitattributes\n")
 	}
 
+	return nil
+}
+
+// installGcHook creates the pre-auto-gc hook in .git/hooks/ so that
+// 'git-chunked-store gc' runs automatically before 'git gc --auto'.
+// If a hook already exists, it is not overwritten to preserve user customizations.
+func installGcHook(binPath string) error {
+	gitDir, err := findGitDir()
+	if err != nil {
+		return fmt.Errorf("finding git directory: %w", err)
+	}
+
+	hooksDir := filepath.Join(gitDir, "hooks")
+	hookPath := filepath.Join(hooksDir, "pre-auto-gc")
+
+	// Check if hook already exists
+	if _, err := os.Stat(hookPath); err == nil {
+		fmt.Fprintf(os.Stderr, "warning: .git/hooks/pre-auto-gc already exists, skipping hook installation\n")
+		fmt.Fprintf(os.Stderr, "hint: add '%s gc' to your pre-auto-gc hook for automatic chunk cleanup\n", binPath)
+		return nil
+	}
+
+	// Create hooks directory if it doesn't exist
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		return fmt.Errorf("creating hooks directory: %w", err)
+	}
+
+	// Write hook script
+	hookScript := fmt.Sprintf(gcHookContent, binPath)
+	if err := os.WriteFile(hookPath, []byte(hookScript), 0755); err != nil {
+		return fmt.Errorf("writing gc hook: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Installed pre-auto-gc hook to %s\n", hookPath)
+	fmt.Fprintf(os.Stderr, "  'git gc --auto' will now run chunk garbage collection automatically\n")
 	return nil
 }

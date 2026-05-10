@@ -459,3 +459,181 @@ func TestSave_AtomicWrite(t *testing.T) {
 		t.Errorf(".tmp file should not exist after successful Save: %s", tmpPath)
 	}
 }
+
+func TestList_EmptyStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := New(tmpDir)
+
+	oids, err := s.List()
+	if err != nil {
+		t.Fatalf("List on empty store failed: %v", err)
+	}
+	if len(oids) != 0 {
+		t.Errorf("expected 0 oids from empty store, got %d", len(oids))
+	}
+}
+
+func TestList_NonexistentDir(t *testing.T) {
+	s := New("/nonexistent/path/that/does/not/exist")
+
+	oids, err := s.List()
+	if err != nil {
+		t.Fatalf("List on nonexistent dir should not error, got: %v", err)
+	}
+	if len(oids) != 0 {
+		t.Errorf("expected 0 oids from nonexistent dir, got %d", len(oids))
+	}
+}
+
+func TestList_MultipleChunks(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := New(tmpDir)
+
+	expectedOids := make(map[string]bool)
+	for i := 0; i < 5; i++ {
+		data := []byte{byte(i)}
+		oid := sha256Hex(data)
+		expectedOids[oid] = true
+		if err := s.Save(oid, data); err != nil {
+			t.Fatalf("Save chunk %d failed: %v", i, err)
+		}
+	}
+
+	oids, err := s.List()
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(oids) != len(expectedOids) {
+		t.Errorf("expected %d oids, got %d", len(expectedOids), len(oids))
+	}
+
+	for _, oid := range oids {
+		if !expectedOids[oid] {
+			t.Errorf("unexpected oid in List result: %s", oid)
+		}
+	}
+}
+
+func TestList_IgnoresInvalidFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := New(tmpDir)
+
+	// Save a valid chunk
+	data := []byte("valid chunk")
+	oid := sha256Hex(data)
+	if err := s.Save(oid, data); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// Create invalid files that should be skipped by List
+	prefixDir := filepath.Join(tmpDir, oid[:2])
+	os.WriteFile(filepath.Join(prefixDir, "not-a-hash-file"), []byte("junk"), 0644)
+	os.MkdirAll(filepath.Join(tmpDir, "ab"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "ab", "tooshort"), []byte("junk"), 0644)
+
+	oids, err := s.List()
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+
+	// Only the valid oid should be listed
+	if len(oids) != 1 {
+		t.Errorf("expected 1 oid, got %d", len(oids))
+	}
+	if len(oids) > 0 && oids[0] != oid {
+		t.Errorf("expected oid %s, got %s", oid, oids[0])
+	}
+}
+
+func TestDelete(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := New(tmpDir)
+
+	data := []byte("to be deleted")
+	oid := sha256Hex(data)
+
+	if err := s.Save(oid, data); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	exists, err := s.Exists(oid)
+	if err != nil {
+		t.Fatalf("Exists error: %v", err)
+	}
+	if !exists {
+		t.Fatal("chunk should exist after Save")
+	}
+
+	if err := s.Delete(oid); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	exists, err = s.Exists(oid)
+	if err != nil {
+		t.Fatalf("Exists error after delete: %v", err)
+	}
+	if exists {
+		t.Error("chunk should not exist after Delete")
+	}
+}
+
+func TestDelete_NonExistent(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := New(tmpDir)
+
+	// Deleting a non-existent oid should not error
+	err := s.Delete("0000000000000000000000000000000000000000000000000000000000000099")
+	if err != nil {
+		t.Errorf("Delete of non-existent oid returned error: %v", err)
+	}
+}
+
+func TestDelete_InvalidOid(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := New(tmpDir)
+
+	if err := s.Delete("not-valid"); err == nil {
+		t.Error("expected error for invalid oid, got nil")
+	}
+}
+
+func TestList_AfterDelete(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := New(tmpDir)
+
+	// Save 3 chunks, delete 1, verify List reflects the change
+	oids := make([]string, 3)
+	for i := range oids {
+		data := []byte{byte(i)}
+		oids[i] = sha256Hex(data)
+		if err := s.Save(oids[i], data); err != nil {
+			t.Fatalf("Save chunk %d failed: %v", i, err)
+		}
+	}
+
+	if err := s.Delete(oids[1]); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	listed, err := s.List()
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Errorf("expected 2 oids after delete, got %d", len(listed))
+	}
+
+	listedMap := make(map[string]bool)
+	for _, oid := range listed {
+		listedMap[oid] = true
+	}
+	if listedMap[oids[0]] != true {
+		t.Error("first chunk should still be listed")
+	}
+	if listedMap[oids[2]] != true {
+		t.Error("third chunk should still be listed")
+	}
+	if listedMap[oids[1]] == true {
+		t.Error("deleted chunk should not be listed")
+	}
+}

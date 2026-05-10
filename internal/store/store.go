@@ -157,6 +157,72 @@ func (s *Store) Load(oid string) ([]byte, error) {
 	return data, nil
 }
 
+// List returns the OIDs of all chunks currently stored in the store.
+// It walks the basePath directory and reconstructs OIDs from the
+// two-level directory structure (<2-hex-prefix>/<62-hex-suffix>).
+// This is used by the gc command to find unreferenced chunks.
+func (s *Store) List() ([]string, error) {
+	var oids []string
+
+	entries, err := os.ReadDir(s.basePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading store directory: %w", err)
+	}
+
+	for _, prefixEntry := range entries {
+		if !prefixEntry.IsDir() {
+			continue
+		}
+
+		prefix := prefixEntry.Name()
+		// The prefix directory should be exactly 2 lowercase hex chars
+		if len(prefix) != 2 {
+			continue
+		}
+
+		subDirPath := filepath.Join(s.basePath, prefix)
+		subEntries, err := os.ReadDir(subDirPath)
+		if err != nil {
+			return nil, fmt.Errorf("reading subdirectory %s: %w", prefix, err)
+		}
+
+		for _, chunkEntry := range subEntries {
+			if chunkEntry.IsDir() {
+				continue
+			}
+
+			suffix := chunkEntry.Name()
+			oid := prefix + suffix
+
+			// Only include valid OIDs (64-char lowercase hex)
+			if err := validateOid(oid); err != nil {
+				continue
+			}
+
+			oids = append(oids, oid)
+		}
+	}
+
+	return oids, nil
+}
+
+// Delete removes a chunk file from storage by its oid.
+// This is used by the gc command to remove unreferenced chunks.
+func (s *Store) Delete(oid string) error {
+	if err := validateOid(oid); err != nil {
+		return fmt.Errorf("validating oid: %w", err)
+	}
+
+	path := s.oidToPath(oid)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("deleting chunk %s: %w", oid, err)
+	}
+	return nil
+}
+
 // zlibCompress compresses data using zlib at the default compression level.
 func zlibCompress(data []byte) ([]byte, error) {
 	var buf bytes.Buffer
