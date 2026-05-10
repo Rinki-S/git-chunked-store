@@ -17,20 +17,6 @@ func sha256Hex(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-func TestNew_DefaultBasePath(t *testing.T) {
-	s := New("")
-	if s.BasePath() != DefaultBasePath {
-		t.Errorf("expected default basePath %q, got %q", DefaultBasePath, s.BasePath())
-	}
-}
-
-func TestNew_CustomBasePath(t *testing.T) {
-	s := New("/tmp/my-chunks")
-	if s.BasePath() != "/tmp/my-chunks" {
-		t.Errorf("expected basePath %q, got %q", "/tmp/my-chunks", s.BasePath())
-	}
-}
-
 func TestOidToPath(t *testing.T) {
 	s := New("/repo/.git/chunked-objects")
 
@@ -112,29 +98,6 @@ func TestValidateOid_PathTraversal(t *testing.T) {
 				t.Errorf("expected error for path traversal oid %q, got nil", tt.oid)
 			}
 		})
-	}
-}
-
-func TestValidateAndDecodeOid(t *testing.T) {
-	oid := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	decoded, err := ValidateAndDecodeOid(oid)
-	if err != nil {
-		t.Fatalf("valid oid should decode, got error: %v", err)
-	}
-	if len(decoded) != 32 {
-		t.Errorf("decoded oid should be 32 bytes, got %d", len(decoded))
-	}
-
-	// Verify round-trip
-	reencoded := hex.EncodeToString(decoded)
-	if reencoded != oid {
-		t.Errorf("round-trip mismatch: got %q, want %q", reencoded, oid)
-	}
-
-	// Invalid oid should fail
-	_, err = ValidateAndDecodeOid("invalid")
-	if err == nil {
-		t.Error("expected error for invalid oid, got nil")
 	}
 }
 
@@ -299,56 +262,6 @@ func TestExists_InvalidOid(t *testing.T) {
 	_, err := s.Exists("../../etc/passwd")
 	if err == nil {
 		t.Error("expected error for path traversal oid, got nil")
-	}
-}
-
-func TestRemove(t *testing.T) {
-	tmpDir := t.TempDir()
-	s := New(tmpDir)
-
-	data := []byte("to be removed")
-	oid := sha256Hex(data)
-
-	if err := s.Save(oid, data); err != nil {
-		t.Fatalf("Save failed: %v", err)
-	}
-	exists, err := s.Exists(oid)
-	if err != nil {
-		t.Fatalf("Exists error: %v", err)
-	}
-	if !exists {
-		t.Fatal("chunk should exist after Save")
-	}
-
-	if err := s.Remove(oid); err != nil {
-		t.Fatalf("Remove failed: %v", err)
-	}
-	exists, err = s.Exists(oid)
-	if err != nil {
-		t.Fatalf("Exists error after remove: %v", err)
-	}
-	if exists {
-		t.Error("chunk should not exist after Remove")
-	}
-}
-
-func TestRemove_NonExistent(t *testing.T) {
-	tmpDir := t.TempDir()
-	s := New(tmpDir)
-
-	// Use a valid-looking 64-char hex oid that doesn't exist
-	err := s.Remove("0000000000000000000000000000000000000000000000000000000000000099")
-	if err != nil {
-		t.Errorf("Remove of non-existent oid returned error: %v", err)
-	}
-}
-
-func TestRemove_InvalidOid(t *testing.T) {
-	tmpDir := t.TempDir()
-	s := New(tmpDir)
-
-	if err := s.Remove("not-valid"); err == nil {
-		t.Error("expected error for invalid oid, got nil")
 	}
 }
 

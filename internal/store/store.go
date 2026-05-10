@@ -6,7 +6,6 @@ package store
 import (
 	"bytes"
 	"compress/zlib"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -156,34 +155,6 @@ func (s *Store) Load(oid string) ([]byte, error) {
 	}
 
 	return data, nil
-}
-
-// Remove deletes a chunk from storage. This is useful for cleanup operations.
-func (s *Store) Remove(oid string) error {
-	if err := validateOid(oid); err != nil {
-		return fmt.Errorf("validating oid: %w", err)
-	}
-
-	path := s.oidToPath(oid)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing chunk %s: %w", oid, err)
-	}
-	return nil
-}
-
-// BasePath returns the base storage directory path.
-func (s *Store) BasePath() string {
-	return s.basePath
-}
-
-// ValidateAndDecodeOid validates that an oid string is a proper hex-encoded
-// SHA-256 hash and returns the raw bytes. This is useful for callers that
-// need to convert oid strings back to byte form.
-func ValidateAndDecodeOid(oid string) ([]byte, error) {
-	if err := validateOid(oid); err != nil {
-		return nil, err
-	}
-	return hex.DecodeString(oid)
 }
 
 // zlibCompress compresses data using zlib at the default compression level.
