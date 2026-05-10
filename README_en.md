@@ -76,7 +76,7 @@ git commit -m "add large binary"    # clean filter triggers automatically
 git checkout other-branch           # smudge filter triggers automatically
 ```
 
-`setup` configures three git settings and creates a `.gitattributes` file with common binary types.
+`setup` configures three git settings, creates a `.gitattributes` file with common binary types, and installs a `pre-auto-gc` hook so that `git gc --auto` runs chunk garbage collection automatically. Users can add or remove file type patterns in `.gitattributes` to match their project's needs — for example, only enabling chunked storage for `.pdf` and `.zip`, or adding project-specific binary types.
 
 ## Subcommands
 
@@ -85,6 +85,21 @@ git checkout other-branch           # smudge filter triggers automatically
 | `clean` | `git add` (via filter) | File content from stdin | Pointer file to stdout |
 | `smudge` | `git checkout` (via filter) | Pointer file from stdin | File content to stdout |
 | `setup` | Manual | — | Configures git filter + `.gitattributes` |
+| `gc` | Manual or automatic via `git gc --auto` | — | Garbage-collects unreferenced chunks |
+
+## gc Command
+
+The `gc` command scans all reachable commits in the git repository for pointer files, collects the chunk OIDs they reference, and deletes any stored chunks that are no longer referenced by any commit. This is analogous to `git gc` for loose objects.
+
+`setup` automatically installs a `pre-auto-gc` hook in `.git/hooks/`, so `git gc --auto` will run chunk garbage collection automatically. **No manual gc is needed — `git gc` handles it.**
+
+```bash
+# Preview what would be removed (no actual deletion)
+./git-chunked-store gc --dry-run
+
+# Manual gc (usually not needed — git gc --auto handles this automatically)
+./git-chunked-store gc
+```
 
 ## Project Structure
 
@@ -94,6 +109,7 @@ git checkout other-branch           # smudge filter triggers automatically
 │   ├── clean.go                     Clean filter + streaming clean
 │   ├── smudge.go                    Smudge filter with integrity check
 │   ├── setup.go                     Git filter & .gitattributes setup
+│   ├── gc.go                        Chunk garbage collection
 │   └── integration_test.go          End-to-end tests
 ├── internal/
 │   ├── chunker/
@@ -149,8 +165,4 @@ go test ./... -cover -count=1
 - **Atomic writes**: Chunks are first written to `.tmp` files and then renamed to their target paths. A crash will never leave a partially written chunk on disk.
 - **Concurrent safety**: Concurrent writes to the same chunk use process IDs and atomic counters to generate unique temp file names. If a rename fails because another process already wrote the same chunk, it is treated as success — content-addressed storage guarantees data integrity.
 
-## Limitations
 
-- Chunks are stored in `.git/chunked-objects/` and are not managed by `git gc`. Cleaning up unreferenced chunks requires a custom garbage-collection tool (not yet implemented).
-- Partial chunk-level downloads are not supported (unlike git-lfs's `git lfs fetch --include`).
-- `.gitattributes` mappings must be maintained manually by the user.

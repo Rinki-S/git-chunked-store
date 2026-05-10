@@ -76,7 +76,7 @@ git commit -m "add large binary"    # 自动触发 clean 过滤器
 git checkout other-branch           # 自动触发 smudge 过滤器
 ```
 
-`setup` 命令会配置三项 git 设置，并创建包含常见二进制文件类型的 `.gitattributes` 文件。
+`setup` 命令会配置三项 git 设置，并创建包含常见二进制文件类型的 `.gitattributes` 文件。用户可按需增减文件类型映射，例如只对 `.pdf` 和 `.zip` 启用分片存储，或添加项目特有的二进制类型。
 
 ## 子命令
 
@@ -85,6 +85,18 @@ git checkout other-branch           # 自动触发 smudge 过滤器
 | `clean` | `git add`（通过过滤器） | stdin 接收文件内容 | stdout 输出指针文件 |
 | `smudge` | `git checkout`（通过过滤器） | stdin 接收指针文件 | stdout 输出文件内容 |
 | `setup` | 手动执行 | — | 配置 git filter + `.gitattributes` |
+| `gc` | 手动执行或随 `git gc --auto` | — | 清理未被引用的分片 |
+
+## gc 命令
+
+`gc` 命令扫描 git 仓库中所有可达提交的指针文件，收集被引用的分片 OID，然后删除不再被任何提交引用的孤立分片。类比 `git gc` 对松散对象的清理。
+
+`setup` 命令会自动在 `.git/hooks/pre-auto-gc` 安装钩子，使得 `git gc --auto` 执行时自动运行分片垃圾回收。**无需手动运行 gc 命令，`git gc` 会自动处理。**
+
+```bash
+# 预览将被删除的孤立分片（不实际删除）
+./git-chunked-store gc --dry-run
+```
 
 ## 项目结构
 
@@ -94,6 +106,7 @@ git checkout other-branch           # 自动触发 smudge 过滤器
 │   ├── clean.go                     clean 过滤器 + 流式处理
 │   ├── smudge.go                    smudge 过滤器 + 完整性校验
 │   ├── setup.go                     git filter & .gitattributes 配置
+│   ├── gc.go                        分片垃圾回收
 │   └── integration_test.go          端到端集成测试
 ├── internal/
 │   ├── chunker/
@@ -148,9 +161,3 @@ go test ./... -cover -count=1
 - **完整性校验**：smudge 还原后自动计算全文 SHA-256，与指针文件中的 oid 比对，数据损坏时立即报错。
 - **原子写入**：分片先写入 `.tmp` 文件，再 `rename` 到目标路径，崩溃不会留下半写文件。
 - **并发安全**：同一分片的并发写入使用进程 ID + 原子计数器生成唯一临时文件名，rename 冲突时检测到目标已存在则视为成功（内容寻址保证数据一致）。
-
-## 限制
-
-- 分片存储在 `.git/chunked-objects/` 中，不会被 `git gc` 管理。如需清理未被引用的分片，需自行实现类似 `git gc` 的机制。
-- 不支持分片级部分下载（git-lfs 的 `git lfs fetch --include` 类似功能）。
-- `.gitattributes` 需要用户手动维护文件类型映射。
