@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
+	"sync"
 
 	"git-chunked-store/internal/chunker"
 	"git-chunked-store/internal/pointer"
@@ -16,6 +18,17 @@ import (
 
 // DefaultChunkSize is the chunk size used by the clean filter (64KB).
 const DefaultChunkSize = 64 * 1024
+
+// DefaultCleanWorkers is the default number of workers used to save chunks
+// during streaming clean. It is tied to CPU count because chunk saving includes
+// zlib compression, which is CPU-bound before the compressed bytes hit disk.
+var DefaultCleanWorkers = runtime.NumCPU()
+
+type cleanChunkJob struct {
+	index int
+	oid   string
+	data  []byte
+}
 
 // ProcessClean is the core logic of the clean filter that operates on
 // data already in memory. It splits data into chunks, saves each chunk
@@ -63,59 +76,99 @@ func ProcessClean(data []byte, s *store.Store) (string, error) {
 // and returns the serialized pointer file string.
 //
 // Unlike ProcessClean, it never holds the entire file in memory at once.
-// Peak memory usage is approximately 2 × 64KB (one read buffer + one chunk copy
-// being compressed). This makes it suitable for files larger than available RAM.
+// Peak chunk-buffer memory is bounded by the worker count and channel capacity,
+// so it scales with workers rather than file size. This makes it suitable for
+// files larger than available RAM.
 func ProcessCleanStreaming(r io.Reader, s *store.Store) (string, error) {
+	return ProcessCleanStreamingWithWorkers(r, s, DefaultCleanWorkers)
+}
+
+// ProcessCleanStreamingWithWorkers reads data from an io.Reader in 64KB chunks,
+// computes the full-file SHA-256 hash in input order, and saves chunks through
+// a bounded worker pool.
+//
+// The pointer order is still deterministic: chunk OIDs are appended by the
+// reader goroutine before each chunk is handed to workers. Only compression and
+// storage are parallelized.
+func ProcessCleanStreamingWithWorkers(r io.Reader, s *store.Store, workers int) (string, error) {
+	if workers <= 0 {
+		workers = 1
+	}
+
 	fileHash := sha256.New()
 	var fileSize int64
 	var chunkOids []string
-	buf := make([]byte, DefaultChunkSize)
 
-	for chunkIndex := 0; ; chunkIndex++ {
-		n, readErr := io.ReadFull(r, buf)
+	jobs := make(chan cleanChunkJob, workers)
+	errCh := make(chan error, 1)
 
-		// No bytes read — either EOF (empty or exhausted stream) or a real error
-		if n == 0 {
-			if readErr != nil && readErr != io.EOF {
-				return "", fmt.Errorf("reading input: %w", readErr)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for job := range jobs {
+				if err := s.Save(job.oid, job.data); err != nil {
+					select {
+					case errCh <- fmt.Errorf("saving chunk %d (%s): %w", job.index, job.oid, err):
+					default:
+					}
+					return
+				}
 			}
-			break
-		}
-
-		// Make a copy of the chunk data since buf will be overwritten
-		// in the next iteration. This copy is at most 64KB, so total
-		// peak memory is ~128KB regardless of file size.
-		chunk := make([]byte, n)
-		copy(chunk, buf[:n])
-
-		// Update running hash for the full file
-		fileHash.Write(chunk)
-		fileSize += int64(n)
-
-		// Compute chunk hash
-		chunkHash := sha256.Sum256(chunk)
-		chunkOid := hex.EncodeToString(chunkHash[:])
-		chunkOids = append(chunkOids, chunkOid)
-
-		// Save chunk to store (deduplication is handled inside Store.Save)
-		if err := s.Save(chunkOid, chunk); err != nil {
-			return "", fmt.Errorf("saving chunk %d (%s): %w", chunkIndex, chunkOid, err)
-		}
-
-		// io.ReadFull returns io.ErrUnexpectedEOF when fewer bytes than
-		// buf size were read before hitting EOF. This is the normal end-of-file
-		// case for the last partial chunk.
-		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
-			break
-		}
-
-		// Any other read error is unexpected
-		if readErr != nil {
-			return "", fmt.Errorf("reading input: %w", readErr)
-		}
+		}()
 	}
 
-	// Finalize the file hash (SHA-256 of the entire concatenated content)
+	readErr := func() error {
+		defer close(jobs)
+
+		buf := make([]byte, DefaultChunkSize)
+		for chunkIndex := 0; ; chunkIndex++ {
+			n, err := io.ReadFull(r, buf)
+
+			if n == 0 {
+				if err != nil && err != io.EOF {
+					return fmt.Errorf("reading input: %w", err)
+				}
+				return nil
+			}
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+
+			fileHash.Write(chunk)
+			fileSize += int64(n)
+			chunkHash := sha256.Sum256(chunk)
+			chunkOid := hex.EncodeToString(chunkHash[:])
+			chunkOids = append(chunkOids, chunkOid)
+
+			select {
+			case jobs <- cleanChunkJob{index: chunkIndex, oid: chunkOid, data: chunk}:
+			case saveErr := <-errCh:
+				return saveErr
+			}
+
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("reading input: %w", err)
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	select {
+	case saveErr := <-errCh:
+		return "", saveErr
+	default:
+	}
+
+	if readErr != nil {
+		return "", readErr
+	}
+
 	fileOid := hex.EncodeToString(fileHash.Sum(nil))
 
 	p := &pointer.Pointer{
