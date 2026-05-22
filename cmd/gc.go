@@ -3,9 +3,13 @@
 package cmd
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"git-chunked-store/internal/pointer"
@@ -101,6 +105,8 @@ func collectReferencedOids() (map[string]bool, error) {
 
 	fmt.Fprintf(os.Stderr, "Scanning %d commit(s)...\n", len(commits))
 
+	var blobHashes []string
+
 	for i, commit := range commits {
 		if i > 0 && i%500 == 0 {
 			fmt.Fprintf(os.Stderr, "  scanned %d/%d commits...\n", i, len(commits))
@@ -113,17 +119,17 @@ func collectReferencedOids() (map[string]bool, error) {
 			continue
 		}
 
-		for _, line := range strings.Split(string(lsTreeOutput), "\n") {
+		for line := range strings.SplitSeq(string(lsTreeOutput), "\n") {
 			if line == "" {
 				continue
 			}
 			// Format: <mode> <type> <hash>\t<path>
-			tabIdx := strings.Index(line, "\t")
-			if tabIdx == -1 {
+			before, _, ok := strings.Cut(line, "\t")
+			if !ok {
 				continue
 			}
 
-			metaField := line[:tabIdx]
+			metaField := before
 			fields := strings.Fields(metaField)
 			if len(fields) < 3 {
 				continue
@@ -138,29 +144,99 @@ func collectReferencedOids() (map[string]bool, error) {
 			if seenBlobs[blobHash] {
 				continue
 			}
+
 			seenBlobs[blobHash] = true
-
-			// Read blob content and check if it's a pointer file
-			content, err := exec.Command("git", "cat-file", "-p", blobHash).Output()
-			if err != nil {
-				continue
-			}
-
-			if !IsPointer(content) {
-				continue
-			}
-
-			p, err := pointer.ParseBytes(content)
-			if err != nil {
-				// Not a valid pointer file, skip
-				continue
-			}
-
-			for _, oid := range p.ChunkOids {
-				referenced[oid] = true
-			}
+			blobHashes = append(blobHashes, blobHash)
 		}
 	}
 
+	fmt.Fprintf(os.Stderr, "Reading %d unique blob(s) with git cat-file --batch...\n", len(blobHashes))
+
+	if err := collectPointerOidsFromBlobs(blobHashes, referenced); err != nil {
+		return nil, err
+	}
+
 	return referenced, nil
+}
+
+func collectPointerOidsFromBlobs(blobHashes []string, referenced map[string]bool) error {
+	if len(blobHashes) == 0 {
+		return nil
+	}
+
+	cmd := exec.Command("git", "cat-file", "--batch")
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("opening cat-file stdin: %w", err)
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("opening cat-file stdout: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("starting git cat-file --batch: %w", err)
+	}
+
+	go func() {
+		defer stdin.Close()
+
+		for _, blobHash := range blobHashes {
+			fmt.Fprintln(stdin, blobHash)
+		}
+	}()
+
+	reader := bufio.NewReader(stdout)
+
+	for range blobHashes {
+		header, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("reading cat-file header: %w", err)
+		}
+
+		fields := strings.Fields(header)
+		if len(fields) != 3 {
+			return fmt.Errorf("invalid cat-file header: %q", strings.TrimSpace(header))
+		}
+
+		objType := fields[1]
+		size, err := strconv.ParseInt(fields[2], 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid cat-file object size %q: %w", fields[2], err)
+		}
+
+		content := make([]byte, size)
+		if _, err := io.ReadFull(reader, content); err != nil {
+			return fmt.Errorf("reading cat-file object content: %w", err)
+		}
+
+		if _, err := reader.ReadByte(); err != nil {
+			return fmt.Errorf("reading cat-file object separator: %w", err)
+		}
+
+		if objType != "blob" {
+			continue
+		}
+
+		if !IsPointer(content) {
+			continue
+		}
+
+		p, err := pointer.Parse(bytes.NewReader(content))
+		if err != nil {
+			continue
+		}
+
+		for _, oid := range p.ChunkOids {
+			referenced[oid] = true
+		}
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("git cat-file --batch: %w", err)
+	}
+
+	return nil
 }
