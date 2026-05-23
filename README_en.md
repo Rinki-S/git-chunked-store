@@ -11,6 +11,7 @@
 <p align="center">
   <a href="README.md">中文</a> ·
   <a href="#quick-start">Quick Start</a> ·
+  <a href="docs/demo.md">Demo</a> ·
   <a href="#commands">Commands</a> ·
   <a href="#architecture">Architecture</a>
 </p>

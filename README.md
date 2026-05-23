@@ -11,6 +11,7 @@
 <p align="center">
   <a href="README_en.md">English</a> ·
   <a href="#快速开始">快速开始</a> ·
+  <a href="docs/demo.md">Demo</a> ·
   <a href="#命令参考">命令参考</a> ·
   <a href="#架构">架构</a>
 </p>
