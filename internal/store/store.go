@@ -157,6 +157,20 @@ func (s *Store) Load(oid string) ([]byte, error) {
 	return data, nil
 }
 
+// CompressedSize returns the on-disk size of a compressed chunk by its oid.
+func (s *Store) CompressedSize(oid string) (int64, error) {
+	if err := validateOid(oid); err != nil {
+		return 0, fmt.Errorf("validating oid: %w", err)
+	}
+
+	info, err := os.Stat(s.oidToPath(oid))
+	if err != nil {
+		return 0, fmt.Errorf("stating chunk %s: %w", oid, err)
+	}
+
+	return info.Size(), nil
+}
+
 // List returns the OIDs of all chunks currently stored in the store.
 // It walks the basePath directory and reconstructs OIDs from the
 // two-level directory structure (<2-hex-prefix>/<62-hex-suffix>).

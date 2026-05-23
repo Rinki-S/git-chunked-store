@@ -303,6 +303,32 @@ func TestSave_CompressedOnDisk(t *testing.T) {
 	}
 }
 
+func TestCompressedSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := New(tmpDir)
+
+	data := []byte("compressed size test data")
+	oid := sha256Hex(data)
+
+	if err := s.Save(oid, data); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	got, err := s.CompressedSize(oid)
+	if err != nil {
+		t.Fatalf("CompressedSize failed: %v", err)
+	}
+
+	info, err := os.Stat(s.oidToPath(oid))
+	if err != nil {
+		t.Fatalf("stat chunk file: %v", err)
+	}
+
+	if got != info.Size() {
+		t.Errorf("CompressedSize = %d, want %d", got, info.Size())
+	}
+}
+
 func TestMultipleChunks(t *testing.T) {
 	tmpDir := t.TempDir()
 	s := New(tmpDir)

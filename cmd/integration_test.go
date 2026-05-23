@@ -11,6 +11,11 @@ import (
 	"git-chunked-store/internal/store"
 )
 
+func testSHA256Hex(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
 // TestProcessCleanSmudge_RoundTripSmallFile tests that clean followed by smudge
 // reproduces the original data for a small file (single chunk).
 func TestProcessCleanSmudge_RoundTripSmallFile(t *testing.T) {
@@ -559,5 +564,57 @@ func TestProcessCleanStreaming_Sha256Correctness(t *testing.T) {
 
 	if p.Oid != expectedOid {
 		t.Errorf("streaming hash mismatch:\n  got  %s\n  want %s", p.Oid, expectedOid)
+	}
+}
+
+func TestCollectChunkStoreStats(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := store.New(tmpDir)
+
+	referencedData := []byte("referenced chunk")
+	orphanedData := []byte("orphaned chunk")
+	referencedOid := testSHA256Hex(referencedData)
+	orphanedOid := testSHA256Hex(orphanedData)
+
+	if err := s.Save(referencedOid, referencedData); err != nil {
+		t.Fatalf("saving referenced chunk: %v", err)
+	}
+	if err := s.Save(orphanedOid, orphanedData); err != nil {
+		t.Fatalf("saving orphaned chunk: %v", err)
+	}
+
+	missingOid := "0000000000000000000000000000000000000000000000000000000000000001"
+	referenced := map[string]bool{
+		referencedOid: true,
+		missingOid:    true,
+	}
+
+	stats, err := collectChunkStoreStats(s, referenced)
+	if err != nil {
+		t.Fatalf("collectChunkStoreStats failed: %v", err)
+	}
+
+	if stats.storedChunks != 2 {
+		t.Errorf("storedChunks = %d, want 2", stats.storedChunks)
+	}
+	if stats.referencedChunks != 1 {
+		t.Errorf("referencedChunks = %d, want 1", stats.referencedChunks)
+	}
+	if stats.orphanedChunks != 1 {
+		t.Errorf("orphanedChunks = %d, want 1", stats.orphanedChunks)
+	}
+	if stats.missingReferenced != 1 {
+		t.Errorf("missingReferenced = %d, want 1", stats.missingReferenced)
+	}
+
+	wantLogicalSize := int64(len(referencedData) + len(orphanedData))
+	if stats.logicalSize != wantLogicalSize {
+		t.Errorf("logicalSize = %d, want %d", stats.logicalSize, wantLogicalSize)
+	}
+	if stats.compressedSize <= 0 {
+		t.Errorf("compressedSize = %d, want positive", stats.compressedSize)
+	}
+	if stats.orphanedCompressed <= 0 {
+		t.Errorf("orphanedCompressed = %d, want positive", stats.orphanedCompressed)
 	}
 }
