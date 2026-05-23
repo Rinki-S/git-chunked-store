@@ -1,188 +1,272 @@
-# Git Chunked Store
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="Git Chunked Store logo" width="160">
+</p>
 
-一个 Git clean/smudge 过滤器，将大型二进制文件按 64KB 分片，以 SHA-256 内容寻址 + zlib 压缩存储，实现分片级去重。
+<h1 align="center">Git Chunked Store</h1>
 
-**[English](README_en.md) | 中文**
+<p align="center">
+  一个基于 Git clean/smudge filter 的内容寻址分片存储后端。
+</p>
 
-## 工作原理
+<p align="center">
+  <a href="README_en.md">English</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#命令参考">命令参考</a> ·
+  <a href="#架构">架构</a>
+</p>
 
-不同于 git-lfs 的整文件存储方式，`git-chunked-store` 将二进制文件按 64KB 切片，每个分片用 SHA-256 命名、zlib 压缩后存储。修改 1 GB 文件的一个字节，只会新增一个 64KB 分片——其余分片全部去重。
+<p align="center">
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-black">
+  <img alt="Status" src="https://img.shields.io/badge/status-experimental-orange">
+</p>
 
-```
-git add（clean 过滤器）                    git checkout（smudge 过滤器）
-───────────────────────                    ─────────────────────────
-工作区文件（二进制）                        Git 中存储的指针文件
-        │                                           │
-        ▼                                           ▼
-  ┌──────────────────┐                      ┌──────────────────┐
-  │ 按 64KB 切片      │                      │ 解析指针文件      │
-  │ 每片计算 SHA-256  │                      │ 按 oid 读取分片   │
-  │ zlib 压缩         │                      │ zlib 解压         │
-  │ 去重后写入磁盘    │                      │ 按序拼接还原      │
-  └──────────────────┘                      └──────────────────┘
-        │                                           │
-        ▼                                           ▼
-  .git/chunked-objects/                     工作区文件（二进制）
-  └── ab/c3d4e5f6...（zlib 压缩）
-```
+## 概览
 
-### 指针文件格式
+Git Chunked Store 是一个实验性的 Git 大文件存储工具。它通过 Git 的 clean/smudge filter 接入 `git add` 和 `git checkout` 流程，把被 `.gitattributes` 标记的大文件切成固定大小的分片，并将分片以 SHA-256 内容寻址的方式压缩存储在本地 `.git/chunked-objects` 中。
 
-Git 中只存储一份简短的指针文件，而非原始二进制：
+它和 Git LFS 的思路相似：Git 仓库里只保存一个轻量 pointer 文件，真实内容由外部存储管理。不同点是 Git Chunked Store 不是按整文件存储，而是按 64KB chunk 存储，因此跨文件、跨版本的重复 chunk 可以天然去重。
 
-```
-version https://git-lfs-chunked/1
-oid sha256:c17fa25800639d68256bcdf5fc1fbb98ed487265a7e292cf4cf00bb1ece4c33f
-size 204800
-chunk-size 65536
-chunks 4
-chunk-oids sha256:cef489e85c00... sha256:0b3e8860e838... sha256:80be0fd9404f... sha256:0a8053f6f58f...
-```
-
-### 分片存储
-
-每个分片存储路径为：
-```
-.git/chunked-objects/<sha256前2位>/<sha256剩余62位>
-```
-
-内容经 zlib 压缩，相同分片（跨文件、跨版本）只存一份。
+当前版本专注于本地 chunk store。`.git/chunked-objects` 不会随普通 `git push` 上传到远端仓库；多人协作场景需要配套的 chunk 同步机制。
 
 ## 特性
 
-- **分片级去重** — 仅变更的分片占用新空间
-- **内容寻址** — SHA-256 校验确保每次读取的数据完整性
-- **zlib 压缩** — 分片压缩存储，与 Git 松散对象一致
-- **流式处理** — `ProcessCleanStreaming` 按 64KB 逐片处理，不将整个文件载入内存
-- **原子写入** — 分片先写临时文件再 rename，防止崩溃导致数据损坏
-- **路径穿越防护** — 所有 OID 严格校验为 64 字符小写 hex，杜绝恶意路径注入
-- **优雅透传** — smudge 过滤器对非指针内容原样返回，`setup` 后对已有二进制文件安全无害
-- **零外部依赖** — 纯 Go 实现，仅使用标准库
+- **分片级去重**：文件被切成 64KB chunk，相同 chunk 只存一份。
+- **内容寻址**：每个 chunk 使用原始内容的 SHA-256 作为 OID。
+- **压缩存储**：chunk 写入前使用 zlib 压缩。
+- **流式 clean**：大文件不需要完整载入内存，按 chunk 读取和处理。
+- **并发写入**：streaming clean 使用 worker pool 并发压缩和保存 chunk。
+- **原子落盘**：chunk 先写临时文件，再 rename 到最终路径。
+- **完整性校验**：smudge 和 fsck 会验证文件级 hash 与 chunk hash。
+- **垃圾回收**：`gc` 可清理不再被 Git 历史引用的孤立 chunk。
+- **指标统计**：`stats` 显示压缩率、引用 chunk、孤立 chunk 和缺失 chunk。
+- **零第三方运行时依赖**：核心实现只使用 Go 标准库。
 
 ## 快速开始
 
-### 1. 安装（只需一次）
-
-将项目克隆到任意位置并编译，二进制文件可以放在任何地方，不需要放入你的项目仓库：
+### 1. 构建
 
 ```bash
-# 克隆并编译
-git clone https://github.com/your-org/git-chunked-store.git
+git clone <repo-url>
 cd git-chunked-store
 go build -o git-chunked-store .
+```
 
-# 可以移到 PATH 中的任意位置，例如：
+可选：把二进制放到 `PATH` 中。
+
+```bash
 sudo mv git-chunked-store /usr/local/bin/
 ```
 
-### 2. 在你的仓库中配置
+### 2. 在目标仓库中启用
 
-进入你自己的项目仓库，运行 `setup`。它会配置 git filter、创建 `.gitattributes`、安装 gc 钩子：
+进入你想管理大文件的 Git 仓库：
 
 ```bash
-cd /path/to/your/project
+cd /path/to/your/repo
 git-chunked-store setup
 ```
 
-如果二进制不在 PATH 中，也可以直接用绝对路径：
+`setup` 会写入 `filter.chunked.clean` 和 `filter.chunked.smudge` 配置，创建默认 `.gitattributes`，并安装 `.git/hooks/pre-auto-gc` 以便 `git gc --auto` 触发 chunk GC。
 
-```bash
-/path/to/git-chunked-store setup
-```
-
-### 3. 正常使用 git
-
-之后所有操作都是标准的 git 命令，无需额外操作：
+### 3. 正常使用 Git
 
 ```bash
 cp large-video.mp4 .
-git add .
-git commit -m "add large binary"    # 自动触发 clean 过滤器
-git checkout other-branch           # 自动触发 smudge 过滤器
+git add large-video.mp4
+git commit -m "add large video"
 ```
 
-`setup` 会将 git-chunked-store 的绝对路径写入 git config，所以 git 会自动找到它。用户可按需增减 `.gitattributes` 中的文件类型映射，例如只对 `.pdf` 和 `.zip` 启用分片存储，或添加项目特有的二进制类型。`git gc --auto` 会自动清理不再被引用的孤立分片，无需手动操作。
+`git add` 会触发 clean filter：真实文件被切分并存入 `.git/chunked-objects`，Git 对象库中只保存 pointer 文件。
 
-## 子命令
+checkout 时 smudge filter 会读取 pointer，按顺序加载 chunk，解压并还原原始文件。
 
-| 命令 | 触发方式 | 输入 | 输出 |
-|------|---------|------|------|
-| `clean` | `git add`（通过过滤器） | stdin 接收文件内容 | stdout 输出指针文件 |
-| `smudge` | `git checkout`（通过过滤器） | stdin 接收指针文件 | stdout 输出文件内容 |
-| `setup` | 手动执行 | — | 配置 git filter + `.gitattributes` |
-| `gc` | 手动执行或随 `git gc --auto` | — | 清理未被引用的分片 |
+## 命令参考
 
-## gc 命令
+| 命令 | 用途 |
+|---|---|
+| `git-chunked-store setup` | 配置 Git filter、默认 `.gitattributes` 和 GC hook |
+| `git-chunked-store clean` | clean filter 入口，通常由 Git 自动调用 |
+| `git-chunked-store smudge` | smudge filter 入口，通常由 Git 自动调用 |
+| `git-chunked-store gc` | 删除不再被 Git 历史引用的 chunk |
+| `git-chunked-store gc --dry-run` | 预览将被删除的孤立 chunk |
+| `git-chunked-store fsck` | 校验 pointer、chunk 和重建文件的完整性 |
+| `git-chunked-store stats` | 输出 chunk store 的压缩、引用和孤立数据指标 |
 
-`gc` 命令扫描 git 仓库中所有可达提交的指针文件，收集被引用的分片 OID，然后删除不再被任何提交引用的孤立分片。类比 `git gc` 对松散对象的清理。
-
-`setup` 命令会自动在 `.git/hooks/pre-auto-gc` 安装钩子，使得 `git gc --auto` 执行时自动运行分片垃圾回收。**无需手动运行 gc 命令，`git gc` 会自动处理。**
+### `stats`
 
 ```bash
-# 预览将被删除的孤立分片（不实际删除）
-./git-chunked-store gc --dry-run
+git-chunked-store stats
 ```
+
+示例输出：
+
+```text
+Stored chunks: 128
+Referenced chunks: 120
+Orphaned chunks: 8
+Missing referenced chunks: 0
+Logical chunk size: 8.0 MB (8388608 bytes)
+Compressed size: 4.2 MB (4404019 bytes)
+Orphaned compressed size: 256.0 KB (262144 bytes)
+Compression ratio: 52.5%
+```
+
+`Missing referenced chunks` 大于 0 通常表示 pointer 引用的 chunk 在本地存储中缺失，应运行 `fsck` 获取更详细的错误信息。
+
+### `fsck`
+
+```bash
+git-chunked-store fsck
+```
+
+`fsck` 会扫描所有可达 Git 提交中的 pointer 文件，并验证：
+
+- pointer 文件格式是否合法
+- pointer 引用的 chunk 是否存在
+- chunk 解压后 SHA-256 是否等于 chunk OID
+- 重建后的文件大小是否等于 pointer `size`
+- 重建后的文件 SHA-256 是否等于 pointer `oid`
+
+### `gc`
+
+```bash
+git-chunked-store gc --dry-run
+git-chunked-store gc
+```
+
+`gc` 会扫描 Git 历史中仍被 pointer 引用的 chunk，并删除本地 chunk store 中不再被引用的文件。内部使用 `git cat-file --batch` 批量读取 blob，避免为每个 blob 启动独立 Git 进程。
+
+## 架构
+
+### Clean / Smudge 流程
+
+```mermaid
+flowchart TB
+    subgraph Clean["git add / clean filter"]
+        A["Working tree file"] --> B["Read stream"]
+        B --> C["Split into 64KB chunks"]
+        C --> D["SHA-256 each chunk"]
+        D --> E["zlib compress and save chunks"]
+        E --> F["Emit pointer file"]
+    end
+
+    F --> G["Git object database"]
+    E --> H[".git/chunked-objects"]
+
+    subgraph Smudge["git checkout / smudge filter"]
+        I["Pointer file"] --> J["Parse chunk OIDs"]
+        J --> K["Load chunks by OID"]
+        K --> L["zlib decompress"]
+        L --> M["Concatenate in order"]
+        M --> N["Verify full-file SHA-256"]
+        N --> O["Working tree file"]
+    end
+
+    G --> I
+    H --> K
+```
+
+### Pointer 文件格式
+
+```text
+version https://git-lfs-chunked/1
+oid sha256:<full-file-sha256>
+size <file-size>
+chunk-size 65536
+chunks <chunk-count>
+chunk-oids sha256:<chunk-1> sha256:<chunk-2> ...
+```
+
+空文件会生成 `chunks 0`，并省略 `chunk-oids` 行。
+
+### Chunk 存储布局
+
+```text
+.git/chunked-objects/
+├── ab/
+│   └── cdef...    # zlib-compressed chunk
+└── f0/
+    └── 1234...
+```
+
+路径格式：
+
+```text
+.git/chunked-objects/<sha256-first-2>/<sha256-remaining-62>
+```
+
+这种布局和 Git loose object 类似，可以避免单目录文件数量过大。
 
 ## 项目结构
 
-```
-├── main.go                          CLI 入口
+```text
+.
 ├── cmd/
-│   ├── clean.go                     clean 过滤器 + 流式处理
-│   ├── smudge.go                    smudge 过滤器 + 完整性校验
-│   ├── setup.go                     git filter & .gitattributes 配置
-│   ├── gc.go                        分片垃圾回收
-│   └── integration_test.go          端到端集成测试
+│   ├── clean.go              # clean filter and streaming chunk writes
+│   ├── smudge.go             # smudge filter and file reconstruction
+│   ├── setup.go              # Git filter / attributes / hook setup
+│   ├── gc.go                 # unreferenced chunk collection
+│   ├── fsck.go               # integrity verification
+│   ├── stats.go              # chunk store metrics
+│   └── integration_test.go
 ├── internal/
-│   ├── chunker/
-│   │   ├── chunker.go               64KB 分片 & SHA-256 哈希
-│   │   └── chunker_test.go
-│   ├── pointer/
-│   │   ├── pointer.go               指针文件格式解析/序列化
-│   │   └── pointer_test.go
-│   └── store/
-│       ├── store.go                  磁盘 I/O、zlib 压缩、去重、原子写入、OID 校验
-│       └── store_test.go
-├── go.mod
-└── .gitattributes                   默认二进制文件类型映射
+│   ├── chunker/              # chunk splitting and hashing
+│   ├── pointer/              # pointer serialization and parsing
+│   └── store/                # compressed content-addressed chunk store
+├── .github/workflows/        # CI and release workflows
+├── docs/assets/logo.svg
+├── main.go
+└── go.mod
 ```
 
-## 测试
+## 开发
 
 ```bash
-go test ./... -cover -count=1
+go test ./... -count=1
+go vet ./...
 ```
 
-| 包 | 覆盖率 |
-|---|--------|
-| `internal/chunker` | 100.0% |
-| `internal/pointer` | 94.8% |
-| `internal/store` | 75.8% |
-| `cmd` | 50.0% |
+CI 会在 Linux、macOS 和 Windows 上运行测试与 `go vet`。
 
-共 94 个测试用例，覆盖：
+发布流程由 GitHub Actions 触发：
 
-- 分片逻辑：空文件、不足一片、恰好整倍数、非整倍数、边界值
-- 指针格式：序列化/解析往返、错误格式、空行、未知字段
-- 存储层：存取往返、去重、zlib 压缩、原子写入、OID 校验、路径穿越拒绝
-- 集成测试：clean→smudge 往返（所有文件大小）、完整性校验、非指针内容透传
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
 
-## 架构决策
+release workflow 会构建：
 
-| 决策 | 选择 | 原因 |
-|------|------|------|
-| 文件类型区分 | `.gitattributes` 手动标记 | 与 git-lfs 一致，显式配置零性能浪费 |
-| 分片大小 | 64KB | 兼顾粒度与开销 |
-| 分片命名 | 原始内容 SHA-256 | 内容寻址天然去重 |
-| 存储压缩 | zlib | 与 git objects 一致，减少磁盘占用 |
-| 小文件处理 | 仍走分片（1 个分片） | 统一逻辑无特殊分支 |
-| 路径结构 | `xx/xxxx...` 两级目录 | 与 git objects 一致，避免单目录文件过多 |
-| OID 校验 | 仅允许 64 字符小写 hex | 防止路径穿越攻击 |
-| Smudge 透传 | 非指针内容原样返回 | 已有二进制文件的仓库也能安全 setup |
+- `linux-amd64`
+- `linux-arm64`
+- `darwin-amd64`
+- `darwin-arm64`
+- `windows-amd64.exe`
 
-## 安全性
+## 限制
 
-- **OID 校验**：所有分片标识符必须为 64 字符小写 hex 编码的 SHA-256 哈希。非法字符（`/`、`..`、大写字母等）会被拒绝，杜绝路径穿越攻击。
-- **完整性校验**：smudge 还原后自动计算全文 SHA-256，与指针文件中的 oid 比对，数据损坏时立即报错。
-- **原子写入**：分片先写入 `.tmp` 文件，再 `rename` 到目标路径，崩溃不会留下半写文件。
-- **并发安全**：同一分片的并发写入使用进程 ID + 原子计数器生成唯一临时文件名，rename 冲突时检测到目标已存在则视为成功（内容寻址保证数据一致）。
+- chunk store 当前仅保存在本地 `.git/chunked-objects` 中。
+- 普通 `git push` 不会上传 chunk 数据。
+- 仓库迁移或多人协作需要额外同步 `.git/chunked-objects`，或实现远端 chunk 存储。
+- 当前使用固定 64KB 分片；在文件头部插入内容时，后续分片边界可能整体漂移。
+
+## 安全性与可靠性
+
+- OID 必须是 64 位小写 hex SHA-256，防止路径穿越。
+- chunk 写入使用临时文件和原子 rename。
+- 并发写入同一 chunk 时，内容寻址使结果幂等。
+- smudge 会校验重建文件的全文 SHA-256。
+- fsck 可离线检查 chunk store 是否损坏或缺失 chunk。
+- stats 可暴露孤立 chunk 和缺失引用，便于维护。
+
+## 路线图
+
+- [ ] 支持远端 chunk push/fetch
+- [ ] 支持 pack 文件，减少大量小文件带来的文件系统压力
+- [ ] 支持 content-defined chunking，降低头部插入导致的 chunk 边界漂移
+- [ ] 为 `stats` 增加 JSON 输出，方便脚本集成
+
+## License
+
+MIT
